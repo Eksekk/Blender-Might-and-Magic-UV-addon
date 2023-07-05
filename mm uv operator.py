@@ -21,9 +21,6 @@ import bpy, bmesh
 TODO:
 * grab settings from face
 * preset UV coordinates (say, for cabinets or buttons)
-* arrow keys to change uv (like in editor)
-* relative UV coordinates mode (current, coords are affected by vertex positions) and
-* absolute UV coordinates mode (no matter vertex coords, texture always has same UV offsets)
 """
 
 # adapted from Grayface's editor code
@@ -152,9 +149,10 @@ def changeUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=Fals
                 offU = (offU + orig_uv[0] % bmpWidth)
                 offV = (offV + orig_uv[1] % bmpHeight)
 
+            # trunc is very important!
             if absolute:
                 # UV offsets in blender notation (like 0.34 or 0.55)
-                valU, valV = offU / bmpWidth, offV / bmpHeight
+                valU, valV = trunc(offU / bmpWidth, 1 / bmpWidth), trunc(offV / bmpHeight, 1 / bmpHeight)
                 vertU, vertV = valU - minU, valV - minV
             else:
                 vertU = trunc(offU / float(bmpWidth), 1 / bmpWidth)
@@ -223,8 +221,9 @@ def getFirstAbsoluteVertexUv(face, faceData):
     else:
         print("MinU vert: {} {} {}, index: {}\nMinV vert: {} {} {}, index: {}".format(*minUVert[0].co, minUVert[0].index, *minVVert[0].co, minVVert[0].index))
     bmpWidth, bmpHeight = faceData[2]
-    minU = minU / bmpWidth
-    minV = minV / bmpHeight
+    # trunc is very important!
+    minU = trunc(minU / bmpWidth, 1 / bmpWidth)
+    minV = trunc(minV / bmpHeight, 1 / bmpHeight)
     return minU, minV
 
     
