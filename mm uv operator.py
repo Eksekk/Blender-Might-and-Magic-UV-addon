@@ -12,7 +12,7 @@ bl_info = {
     "category": "UV",
 }
 
-import bpy, mathutils, bmesh
+import bpy, bmesh
 
 #
 # ACTUAL ADDON CODE
@@ -40,7 +40,7 @@ def getUvDirections(normals, indoor=True):
     if nz == 0: # wall
         ux, uy, uz = trunc(-ny / 0x10000, 1 / 0x10000), trunc(nx / 0x10000, 1 / 0x10000), 0
         vx, vy, vz = 0, 0, 1
-    elif abs(nz) >= (0xB569 if indoor else 0xE6CA): # floor, ceil
+    elif abs(nz) >= (0xB569 if indoor else 0xE6CA): # floor, ceil, TODO: outdoor map detection
         ux, uy, uz = 1, 0, 0
         vx, vy, vz = 0, 1, 0
     else:
@@ -49,6 +49,7 @@ def getUvDirections(normals, indoor=True):
         vx, vy, vz = 0, 0, 1
     return ux, uy, uz, vx, vy, vz
 
+# simple data container
 class VertData:
     def __init__(self, vert, u, v, loopIndex):
         self.vert = vert
@@ -57,7 +58,7 @@ class VertData:
         self.loopIndex = loopIndex
     
 # get vertex list, uv coordinates and bmp width/height
-# argument is bmesh face
+# argument is bmesh face and uv map for which to get uv values
 def getFaceData(face, uvmap):
     i = 0
     verts = []
@@ -77,7 +78,9 @@ def getFaceData(face, uvmap):
                 break
             
     return (verts, (ux, uy, uz, vx, vy, vz), (bmpWidth, bmpHeight))
-    
+
+# returns current UV coords the face uses. If vertex UVs are inconsistent, result will be unpredictable
+# arguments: bmesh face and uv map
 def getUvSettingsFromFace(face, uvmap):
     data = getFaceData(face, uvmap)
     verts = data[0]
@@ -105,6 +108,7 @@ def getUvSettingsFromFace(face, uvmap):
     return u, v
 
 # operators such as box select don't add faces to selection history
+# argument: bmesh instance
 def getSelectedFaces(bm):
     faces = [elem for elem in bm.select_history if isinstance(elem, bmesh.types.BMFace)]
     indexes = {elem.index: True for elem in bm.select_history if isinstance(elem, bmesh.types.BMFace)}
@@ -114,6 +118,11 @@ def getSelectedFaces(bm):
             faces.append(face)
     return faces
 
+# sets UV coordinates (relative to vertex coords). Params:
+# uOffset, vOffset - uv to apply or add
+# assignMaterial - if this is a number, all affected faces will get material with this index assigned
+# absolute - (not working now) set coordinates based on lowest v or u value, not based on coords
+# addOffsets - if this is true, offsets are added to current values, otherwise they're replaced with passed offsets
 def zeroUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=False, addOffsets=False):
     bm = bmesh.from_edit_mesh(bpy.context.edit_object.data)
     uvmap = bm.loops.layers.uv.verify()
@@ -129,12 +138,7 @@ def zeroUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=False,
         ux, uy, uz, vx, vy, vz = data[1]
         bmpWidth, bmpHeight = data[2]
         assert bmpWidth != None, "Material's node tree needs to have \"image texture\" node"
-        
-        """
-        changed - caused problems when matching first smaller texture, then bigger
-        uOffset %= bmpWidth
-        vOffset %= bmpHeight
-        """
+
         modOffsetU = uOffset % bmpWidth
         modOffsetV = vOffset % bmpHeight
         
@@ -222,24 +226,33 @@ class MightAndMagicUvSet(bpy.types.Operator):
     def updateUv(self, context):
         self["grabSettingsFromFace"] = False
     
+    # current UV offsets
     uOffset: bpy.props.IntProperty(name="U offset", description="Like in editor", default=0,  update=updateUv)
     vOffset: bpy.props.IntProperty(name="V offset", description="Like in editor", default=0,  update=updateUv)
     
+    # attempt to save offsets before grab settings is activated
     prevUOffset: bpy.props.IntProperty(default=0, options={'HIDDEN'})
     prevVOffset: bpy.props.IntProperty(default=0, options={'HIDDEN'})
     
+    # Checkbox (maybe should really be a button) to grab current UV settings from face
     grabSettingsFromFace: bpy.props.BoolProperty(name="Grab settings from face", description="If disabled, simply sets coordinates. If enabled, gets original coords from face and then allows editing them", default=False, set=setGrab, get=getGrab)
     
+    # mouse XY when modal operator is launched
     first_mouse_x: bpy.props.IntProperty(options = {"HIDDEN"})
     first_mouse_y: bpy.props.IntProperty(options = {"HIDDEN"})
     
+    # UV offsets saved before modal operator is launched (properties don't auto revert upon cancel as with normal operators)
     origUOffset: bpy.props.IntProperty(options = {"HIDDEN"})
     origVOffset: bpy.props.IntProperty(options = {"HIDDEN"})
     
+    # can set coords with mouse or keyboard
     mode: bpy.props.EnumProperty(items = [("MOUSE", "Mouse", "Use mouse to set UV coords instead of keyboard"),        ("KEYBOARD", "Keyboard", "Use keyboard to set UV coords instead of mouse")], name = "Mode", description = "Determines whether coords are set by mouse or keyboard", default = "keyboard")
+    
+    # if mode is mouse, allows "locking" movement to one UV axis
     uOnly: bpy.props.BoolProperty(options = {"HIDDEN"})
     vOnly: bpy.props.BoolProperty(options = {"HIDDEN"})
     
+    # if using keyboard, offsets are added instead of setting absolute. Used to "pass data" between modal and execute methods
     addOffsets: bpy.props.CollectionProperty(options = {"HIDDEN"})
 
     @classmethod
@@ -256,91 +269,79 @@ class MightAndMagicUvSet(bpy.types.Operator):
         if uv == False:
             return {'CANCELLED'}
         return {'FINISHED'}
-    def modal(self, context, event):
-        """
-        if event.type == 'MOUSEMOVE':
-            #delta_x = self.first_mouse_x - event.mouse_x
-            #delta_y = self.first_mouse_y - event.mouse_y
-            delta_x = event.mouse_prev_x - event.mouse_x
-            delta_y = event.mouse_prev_y - event.mouse_y
-            divisor = 4
-            if event.alt:
-                divisor *= 4
-            elif event.ctrl:
-                divisor //= 4
-            #self.uOffset = delta_x // divisor
-            #self.vOffset = delta_y // divisor
-            if not self.vOnly:
-                self.uOffset += delta_x // divisor
-            if not self.uOnly:
-                self.vOffset += delta_y // divisor
-            self.execute(context)
-        elif event.type == "U":
-            self.uOnly = True
-            self.vOnly = False
-        elif event.type == "V":
-            self.uOnly = False
-            self.vOnly = True
-        elif event.type == "A":
+    
+    def doCancel(self, context):
+        self.addOffsets = [self.origUOffset - self.uOffset, self.origVOffset - self.vOffset]
+        self.uOffset = self.origUOffset
+        self.vOffset = self.origVOffset
+        if self.mode == "KEYBOARD":
             self.uOnly = False
             self.vOnly = False
-        elif event.type == 'LEFTMOUSE':
-            return {'FINISHED'}
-        elif event.type in {'RIGHTMOUSE', 'ESC'}:
-            self.uOffset = self.origUOffset
-            self.vOffset = self.origVOffset
-            self.uOnly = False
-            self.vOnly = False
-            self.execute(context)
-            return {'CANCELLED'}
-
-        return {'RUNNING_MODAL'}
-        """
-        add = 8
-        if event.alt:
-            add //= 4
-        elif event.ctrl:
-            add *= 8
-        addWhat = [0, 0]
-        if event.type == 'MOUSEMOVE':
-            #delta_x = self.first_mouse_x - event.mouse_x
-            #delta_y = self.first_mouse_y - event.mouse_y
-            delta_x = event.mouse_prev_x - event.mouse_x
-            delta_y = event.mouse_prev_y - event.mouse_y
-            #self.uOffset = delta_x // divisor
-            #self.vOffset = delta_y // divisor
-            #if not self.vOnly:
-            #    self.uOffset += delta_x // divisor
-            #if not self.uOnly:
-            #    self.vOffset += delta_y // divisor
-        elif "PRESS" in event.value:
-            if event.type == "LEFT_ARROW":
-                addWhat[0] = add
-                print("l")
-            elif event.type == "RIGHT_ARROW":
-                addWhat[0] = -add
-                print("r")
-            elif event.type == "UP_ARROW":
-                addWhat[1] = -add
-                print("t")
-            elif event.type == "DOWN_ARROW":
-                addWhat[1] = add
-                print("b")
-            elif event.type == "RET":
-                return {'FINISHED'}
-        elif event.type == 'LEFTMOUSE':
-            return {'FINISHED'}
-        elif event.type in {'RIGHTMOUSE', 'ESC'}:
-            self.uOffset = self.origUOffset
-            self.vOffset = self.origVOffset
-            #self.uOnly = False
-            #self.vOnly = False
-            self.execute(context)
-            return {'CANCELLED'}
-        self.addOffsets = addWhat
         self.execute(context)
+    
+    def modal(self, context, event):
+        if self.mode == "MOUSE":
+            if event.type == 'MOUSEMOVE':
+                delta_x = event.mouse_prev_x - event.mouse_x
+                delta_y = event.mouse_prev_y - event.mouse_y
+                divisor = 4
+                if event.alt:
+                    divisor *= 4
+                elif event.ctrl:
+                    divisor //= 4
+                self.addOffsets = [0, 0]
+                if not self.vOnly:
+                    self.addOffsets[0] = delta_x // divisor
+                if not self.uOnly:
+                    self.addOffsets[1] = delta_y // divisor
+                self.execute(context)
+            elif event.type == "U":
+                self.uOnly = True
+                self.vOnly = False
+            elif event.type == "V":
+                self.uOnly = False
+                self.vOnly = True
+            elif event.type == "A":
+                self.uOnly = False
+                self.vOnly = False
+            elif event.type == 'LEFTMOUSE':
+                return {'FINISHED'}
+            elif event.type in {'RIGHTMOUSE', 'ESC'}:
+                self.doCancel(context)
+                return {'CANCELLED'}
 
-        return {'RUNNING_MODAL'}
+            return {'RUNNING_MODAL'}
+        elif self.mode == "KEYBOARD":
+            add = 8
+            if event.alt:
+                add //= 4
+            elif event.ctrl:
+                add *= 8
+            addWhat = [0, 0]
+            if "PRESS" in event.value: # don't execute twice
+                if event.type == "LEFT_ARROW":
+                    addWhat[0] = add
+                    print("l")
+                elif event.type == "RIGHT_ARROW":
+                    addWhat[0] = -add
+                    print("r")
+                elif event.type == "UP_ARROW":
+                    addWhat[1] = -add
+                    print("t")
+                elif event.type == "DOWN_ARROW":
+                    addWhat[1] = add
+                    print("b")
+                elif event.type == "RET":
+                    return {'FINISHED'}
+            elif event.type == 'LEFTMOUSE':
+                return {'FINISHED'}
+            elif event.type in {'RIGHTMOUSE', 'ESC'}:
+                self.doCancel(context)
+                return {'CANCELLED'}
+            self.addOffsets = addWhat
+            self.execute(context)
+
+            return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
         if context.object:
