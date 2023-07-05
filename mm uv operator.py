@@ -123,7 +123,7 @@ def getSelectedFaces(bm):
 # assignMaterial - if this is a number, all affected faces will get material with this index assigned
 # absolute - (not working now) set coordinates based on lowest v or u value, not based on coords
 # addOffsets - if this is true, offsets are added to current values, otherwise they're replaced with passed offsets
-def zeroUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=False, addOffsets=False):
+def changeUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=False, addOffsets=False):
     bm = bmesh.from_edit_mesh(bpy.context.edit_object.data)
     uvmap = bm.loops.layers.uv.verify()
     bm.select_history.validate()
@@ -176,7 +176,7 @@ def matchUvToLastSelected(assignMaterial=False):
         return False
     u, v = uv
     faces.remove(last)
-    zeroUvCoordinates(uOffset = u, vOffset = v, assignMaterial = last.material_index if assignMaterial else None)
+    changeUvCoordinates(uOffset = u, vOffset = v, assignMaterial = last.material_index if assignMaterial else None)
     
     bmesh.update_edit_mesh(bpy.context.edit_object.data)
     return u, v
@@ -189,7 +189,11 @@ def getUvFromSelected():
         return False
     return getUvSettingsFromFace(faces[len(faces) - 1], uvmap)
 
-class MightAndMagicUvSet(bpy.types.Operator):
+def genericPoll(context):
+    obj = context.active_object
+    return obj and obj.type == 'MESH' and obj.mode == 'EDIT' and len(getSelectedFaces(bmesh.from_edit_mesh(obj.data))) > 0
+
+class MightAndMagicUvChangeModal(bpy.types.Operator):
     """Set UV coordinates"""
     bl_idname = "mm.uv_set"
     bl_label = "Might and Magic UV set"
@@ -236,50 +240,65 @@ class MightAndMagicUvSet(bpy.types.Operator):
     
     # Checkbox (maybe should really be a button) to grab current UV settings from face
     grabSettingsFromFace: bpy.props.BoolProperty(name="Grab settings from face", description="If disabled, simply sets coordinates. If enabled, gets original coords from face and then allows editing them", default=False, set=setGrab, get=getGrab)
-    
-    # mouse XY when modal operator is launched
-    first_mouse_x: bpy.props.IntProperty(options = {"HIDDEN"})
-    first_mouse_y: bpy.props.IntProperty(options = {"HIDDEN"})
-    
-    # UV offsets saved before modal operator is launched (properties don't auto revert upon cancel as with normal operators)
-    origUOffset: bpy.props.IntProperty(options = {"HIDDEN"})
-    origVOffset: bpy.props.IntProperty(options = {"HIDDEN"})
+
+    @classmethod
+    def poll(cls, context):
+        return genericPoll(context)
+
+    def execute(self, context):
+        uv = map(int, changeUvCoordinates(uOffset = self.uOffset, vOffset = self.vOffset))
+        if uv == False:
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+        
+class MightAndMagicUvChangeModal(bpy.types.Operator):
+    """Change UV coordinates"""
+    bl_idname = "mm.uv_change_modal"
+    bl_label = "Might and Magic UV change modal"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # UV offsets which were applied to selected faces during operator run (to restore original ones later; properties don't auto revert upon cancel as with non-modal operators)
+    uOffsetShift: bpy.props.IntProperty(options = {"HIDDEN"})
+    vOffsetShift: bpy.props.IntProperty(options = {"HIDDEN"})
     
     # can set coords with mouse or keyboard
-    mode: bpy.props.EnumProperty(items = [("MOUSE", "Mouse", "Use mouse to set UV coords instead of keyboard"),        ("KEYBOARD", "Keyboard", "Use keyboard to set UV coords instead of mouse")], name = "Mode", description = "Determines whether coords are set by mouse or keyboard", default = "keyboard")
+    mode: bpy.props.EnumProperty(items = [("MOUSE", "Mouse", "Use mouse to set UV coords instead of keyboard"), ("KEYBOARD", "Keyboard", "Use keyboard to set UV coords instead of mouse")], name = "Mode", description = "Determines whether coords are set by mouse or keyboard", default = "KEYBOARD")
     
     # if mode is mouse, allows "locking" movement to one UV axis
     uOnly: bpy.props.BoolProperty(options = {"HIDDEN"})
     vOnly: bpy.props.BoolProperty(options = {"HIDDEN"})
     
-    # if using keyboard, offsets are added instead of setting absolute. Used to "pass data" between modal and execute methods
+    # Used to "pass data" between modal and execute methods
     addOffsets: bpy.props.CollectionProperty(options = {"HIDDEN"})
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return obj and obj.type == 'MESH' and obj.mode == 'EDIT' and len(getSelectedFaces(bmesh.from_edit_mesh(obj.data))) > 0
+        return genericPoll(context)
 
     def execute(self, context):
-        if len(self.addOffsets) == 2:
-            uv = map(int, zeroUvCoordinates(uOffset = self.addOffsets[0], vOffset = self.addOffsets[1], addOffsets=True))
-        else:
-            uv = map(int, zeroUvCoordinates(uOffset = self.uOffset, vOffset = self.vOffset))
-        self.addOffsets = []
+        self.uOffsetShift += self.addOffsets[0]
+        self.vOffsetShift += self.addOffsets[1]
+        uv = map(int, changeUvCoordinates(uOffset = self.addOffsets[0], vOffset = self.addOffsets[1], addOffsets=True))
         if uv == False:
             return {'CANCELLED'}
+        self.addOffsets = [0, 0]
         return {'FINISHED'}
     
     def doCancel(self, context):
-        self.addOffsets = [self.origUOffset - self.uOffset, self.origVOffset - self.vOffset]
-        self.uOffset = self.origUOffset
-        self.vOffset = self.origVOffset
+        self.addOffsets = [-self.uOffsetShift, -self.vOffsetShift]
         if self.mode == "KEYBOARD":
             self.uOnly = False
             self.vOnly = False
         self.execute(context)
     
     def modal(self, context, event):
+        if event.type == "M" and "PRESS" in event.value:
+            self.mode = "KEYBOARD" if self.mode == "MOUSE" else "MOUSE"
+            return {"RUNNING_MODAL"}
+        
         if self.mode == "MOUSE":
             if event.type == 'MOUSEMOVE':
                 delta_x = event.mouse_prev_x - event.mouse_x
@@ -301,7 +320,7 @@ class MightAndMagicUvSet(bpy.types.Operator):
             elif event.type == "V":
                 self.uOnly = False
                 self.vOnly = True
-            elif event.type == "A":
+            elif event.type == "C":
                 self.uOnly = False
                 self.vOnly = False
             elif event.type == 'LEFTMOUSE':
@@ -321,17 +340,13 @@ class MightAndMagicUvSet(bpy.types.Operator):
             if "PRESS" in event.value: # don't execute twice
                 if event.type == "LEFT_ARROW":
                     addWhat[0] = add
-                    print("l")
                 elif event.type == "RIGHT_ARROW":
                     addWhat[0] = -add
-                    print("r")
                 elif event.type == "UP_ARROW":
                     addWhat[1] = -add
-                    print("t")
                 elif event.type == "DOWN_ARROW":
                     addWhat[1] = add
-                    print("b")
-                elif event.type == "RET":
+                elif event.type == "RET": # enter key
                     return {'FINISHED'}
             elif event.type == 'LEFTMOUSE':
                 return {'FINISHED'}
@@ -345,10 +360,7 @@ class MightAndMagicUvSet(bpy.types.Operator):
 
     def invoke(self, context, event):
         if context.object:
-            self.first_mouse_x = event.mouse_x
-            self.first_mouse_y = event.mouse_y
-            self.origUOffset = self.uOffset
-            self.origVOffset = self.vOffset
+            self.uOffsetShift, self.vOffsetShift = 0, 0
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:
@@ -366,8 +378,7 @@ class MightAndMagicUvMatch(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return obj and obj.type == 'MESH' and obj.mode == 'EDIT' and len(getSelectedFaces(bmesh.from_edit_mesh(obj.data))) > 0
+        return genericPoll(context)
 
     def execute(self, context):
         u, v = matchUvToLastSelected(assignMaterial=self.assignMaterial)
@@ -377,21 +388,21 @@ class MightAndMagicUvMatch(bpy.types.Operator):
         return self.execute(context)
 
 def menu_func_set(self, context):
-    self.layout.operator(MightAndMagicUvSet.bl_idname, text=MightAndMagicUvSet.bl_label)
+    self.layout.operator(MightAndMagicUvChangeModal.bl_idname, text=MightAndMagicUvChangeModal.bl_label)
     
 def menu_func_match(self, context):
     self.layout.operator(MightAndMagicUvMatch.bl_idname, text=MightAndMagicUvMatch.bl_label)
 
 # Register and add to the "uv" menu
 def register():
-    bpy.utils.register_class(MightAndMagicUvSet)
+    bpy.utils.register_class(MightAndMagicUvChangeModal)
     bpy.types.VIEW3D_MT_uv_map.append(menu_func_set)
     
     bpy.utils.register_class(MightAndMagicUvMatch)
     bpy.types.VIEW3D_MT_uv_map.append(menu_func_match)
 
 def unregister():
-    bpy.utils.unregister_class(MightAndMagicUvSet)
+    bpy.utils.unregister_class(MightAndMagicUvChangeModal)
     bpy.types.VIEW3D_MT_uv_map.remove(menu_func_set)
     
     bpy.utils.unregister_class(MightAndMagicUvMatch)
@@ -460,4 +471,4 @@ def getuv():
     return getUvDirections(getSelectedFaces(bm)[0].normal)
 bpy.f.getuv = getuv
 bpy.f.getUvDirections
-bpy.f.zeroUvCoordinates = zeroUvCoordinates
+bpy.f.changeUvCoordinates = changeUvCoordinates
