@@ -193,7 +193,7 @@ def genericPoll(context):
     obj = context.active_object
     return obj and obj.type == 'MESH' and obj.mode == 'EDIT' and len(getSelectedFaces(bmesh.from_edit_mesh(obj.data))) > 0
 
-class MightAndMagicUvChangeModal(bpy.types.Operator):
+class MightAndMagicUvSet(bpy.types.Operator):
     """Set UV coordinates"""
     bl_idname = "mm.uv_set"
     bl_label = "Might and Magic UV set"
@@ -265,7 +265,9 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
     vOffsetShift: bpy.props.IntProperty(options = {"HIDDEN"})
     
     # can set coords with mouse or keyboard
-    mode: bpy.props.EnumProperty(items = [("MOUSE", "Mouse", "Use mouse to set UV coords instead of keyboard"), ("KEYBOARD", "Keyboard", "Use keyboard to set UV coords instead of mouse")], name = "Mode", description = "Determines whether coords are set by mouse or keyboard", default = "KEYBOARD")
+    mode: bpy.props.EnumProperty(items = [("MOUSE", "Mouse", "Use mouse to set UV coords instead of keyboard"),
+                                          ("KEYBOARD", "Keyboard", "Use keyboard to set UV coords instead of mouse")],
+                                 name = "Mode", description = "Determines whether coords are set by mouse or keyboard", default = "KEYBOARD", options = {"HIDDEN"})
     
     # if mode is mouse, allows "locking" movement to one UV axis
     uOnly: bpy.props.BoolProperty(options = {"HIDDEN"})
@@ -281,10 +283,12 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
     def execute(self, context):
         self.uOffsetShift += self.addOffsets[0]
         self.vOffsetShift += self.addOffsets[1]
+        #print("\t".join(self.addOffsets))
         uv = map(int, changeUvCoordinates(uOffset = self.addOffsets[0], vOffset = self.addOffsets[1], addOffsets=True))
         if uv == False:
             return {'CANCELLED'}
         self.addOffsets = [0, 0]
+        context.area.header_text_set("U offset: {}\t\tV offset: {}".format(self.uOffsetShift, self.vOffsetShift))
         return {'FINISHED'}
     
     def doCancel(self, context):
@@ -293,6 +297,7 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
             self.uOnly = False
             self.vOnly = False
         self.execute(context)
+        context.area.header_text_set(None)
     
     def modal(self, context, event):
         if event.type == "M" and "PRESS" in event.value:
@@ -324,16 +329,15 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
                 self.uOnly = False
                 self.vOnly = False
             elif event.type == 'LEFTMOUSE':
+                context.area.header_text_set(None)
                 return {'FINISHED'}
             elif event.type in {'RIGHTMOUSE', 'ESC'}:
                 self.doCancel(context)
                 return {'CANCELLED'}
-
-            return {'RUNNING_MODAL'}
         elif self.mode == "KEYBOARD":
             add = 8
             if event.alt:
-                add //= 4
+                add //= 8
             elif event.ctrl:
                 add *= 8
             addWhat = [0, 0]
@@ -347,8 +351,10 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
                 elif event.type == "DOWN_ARROW":
                     addWhat[1] = add
                 elif event.type == "RET": # enter key
+                    context.area.header_text_set(None)
                     return {'FINISHED'}
             elif event.type == 'LEFTMOUSE':
+                context.area.header_text_set(None)
                 return {'FINISHED'}
             elif event.type in {'RIGHTMOUSE', 'ESC'}:
                 self.doCancel(context)
@@ -356,7 +362,7 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
             self.addOffsets = addWhat
             self.execute(context)
 
-            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
         if context.object:
@@ -388,6 +394,9 @@ class MightAndMagicUvMatch(bpy.types.Operator):
         return self.execute(context)
 
 def menu_func_set(self, context):
+    self.layout.operator(MightAndMagicUvSet.bl_idname, text=MightAndMagicUvSet.bl_label)
+
+def menu_func_change_modal(self, context):
     self.layout.operator(MightAndMagicUvChangeModal.bl_idname, text=MightAndMagicUvChangeModal.bl_label)
     
 def menu_func_match(self, context):
@@ -395,15 +404,21 @@ def menu_func_match(self, context):
 
 # Register and add to the "uv" menu
 def register():
-    bpy.utils.register_class(MightAndMagicUvChangeModal)
+    bpy.utils.register_class(MightAndMagicUvSet)
     bpy.types.VIEW3D_MT_uv_map.append(menu_func_set)
+
+    bpy.utils.register_class(MightAndMagicUvChangeModal)
+    bpy.types.VIEW3D_MT_uv_map.append(menu_func_change_modal)
     
     bpy.utils.register_class(MightAndMagicUvMatch)
     bpy.types.VIEW3D_MT_uv_map.append(menu_func_match)
 
 def unregister():
-    bpy.utils.unregister_class(MightAndMagicUvChangeModal)
+    bpy.utils.unregister_class(MightAndMagicUvSet)
     bpy.types.VIEW3D_MT_uv_map.remove(menu_func_set)
+    
+    bpy.utils.unregister_class(MightAndMagicUvChangeModal)
+    bpy.types.VIEW3D_MT_uv_map.remove(menu_func_change_modal)
     
     bpy.utils.unregister_class(MightAndMagicUvMatch)
     bpy.types.VIEW3D_MT_uv_map.remove(menu_func_match)
