@@ -3,7 +3,7 @@ bl_info = {
     "description": "Makes changing face UV coordinates for Might and Magic maps much easier",
     "author": "Eksekk",
     "version": (1, 0),
-    "blender": (3, 2, 2),
+    "blender": (3, 20, 20),
     "location": "View3D > UV (requires edit mode)",
     "warning": "", # used for warning icon and text in addons panel
     "doc_url": "",
@@ -13,7 +13,6 @@ bl_info = {
 }
 
 import bpy, bmesh
-
 #
 # ACTUAL ADDON CODE
 #
@@ -121,8 +120,8 @@ def getSelectedFaces(bm):
 # sets UV coordinates (relative to vertex coords). Params:
 # uOffset, vOffset - uv to apply or add
 # assignMaterial - if this is a number, all affected faces will get material with this index assigned
-# absolute - (not working now) set coordinates based on lowest v or u value, not based on coords
-# addOffsets - if this is true, offsets are added to current values, otherwise they're replaced with passed offsets
+# absolute - set coordinates based on lowest v or u value, not based on coords
+# addOffsets - if this is true, offsets are added to current face value, otherwise they completely replace original value
 def changeUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=False, addOffsets=False):
     bm = bmesh.from_edit_mesh(bpy.context.edit_object.data)
     uvmap = bm.loops.layers.uv.verify()
@@ -142,22 +141,26 @@ def changeUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=Fals
         modOffsetU = uOffset % bmpWidth
         modOffsetV = vOffset % bmpHeight
         
-        coords = verts[0].vert.co
-        offUAbsolute, offVAbsolute = round(coords[0] * ux + coords[1] * uy + coords[2] * uz + modOffsetU), round(coords[0] * vx + coords[1] * vy + coords[2] * vz + modOffsetV)
-        
+        if absolute:
+            minU, minV = getFirstAbsoluteVertexUv(face, data)
         orig_uv = getUvSettingsFromFace(face, uvmap)
         for vert in verts:
             coords = vert.vert.co
+            # UV offsets in mm notation (like 43 or 187)
             offU, offV = round(coords[0] * ux + coords[1] * uy + coords[2] * uz + modOffsetU), round(coords[0] * vx + coords[1] * vy + coords[2] * vz + modOffsetV)
             if addOffsets:
                 offU = (offU + orig_uv[0] % bmpWidth)
                 offV = (offV + orig_uv[1] % bmpHeight)
+
             if absolute:
-                offU, offV = modOffsetU, modOffsetV
-            vert.u = trunc(offU / float(bmpWidth), 1 / bmpWidth)
-            vert.v = trunc(offV / float(bmpHeight), 1 / bmpHeight)
+                # UV offsets in blender notation (like 0.34 or 0.55)
+                valU, valV = offU / bmpWidth, offV / bmpHeight
+                vertU, vertV = valU - minU, valV - minV
+            else:
+                vertU = trunc(offU / float(bmpWidth), 1 / bmpWidth)
+                vertV = trunc(offV / float(bmpHeight), 1 / bmpHeight)
             # apply changed uv
-            face.loops[vert.loopIndex][uvmap].uv = (vert.u, vert.v)
+            face.loops[vert.loopIndex][uvmap].uv = (vertU, vertV)
     
     bmesh.update_edit_mesh(bpy.context.edit_object.data)
     return uOffset, vOffset
@@ -241,12 +244,14 @@ class MightAndMagicUvSet(bpy.types.Operator):
     # Checkbox (maybe should really be a button) to grab current UV settings from face
     grabSettingsFromFace: bpy.props.BoolProperty(name="Grab settings from face", description="If disabled, simply sets coordinates. If enabled, gets original coords from face and then allows editing them", default=False, set=setGrab, get=getGrab)
 
+    absolute: bpy.props.BoolProperty(name = "Absolute", default=False)
+
     @classmethod
     def poll(cls, context):
         return genericPoll(context)
 
     def execute(self, context):
-        uv = map(int, changeUvCoordinates(uOffset = self.uOffset, vOffset = self.vOffset))
+        uv = map(int, changeUvCoordinates(uOffset = self.uOffset, vOffset = self.vOffset, absolute = self.absolute))
         if uv == False:
             return {'CANCELLED'}
         return {'FINISHED'}
@@ -289,6 +294,7 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
             return {'CANCELLED'}
         self.addOffsets = [0, 0]
         context.area.header_text_set("U offset: {}\t\tV offset: {}".format(self.uOffsetShift, self.vOffsetShift))
+        #context.workspace.status_text_set("test {}".format(self.uOffsetShift + self.vOffsetShift))
         return {'FINISHED'}
     
     def doCancel(self, context):
@@ -330,6 +336,7 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
                 self.vOnly = False
             elif event.type == 'LEFTMOUSE':
                 context.area.header_text_set(None)
+                #context.workspace.status_text_set(None)
                 return {'FINISHED'}
             elif event.type in {'RIGHTMOUSE', 'ESC'}:
                 self.doCancel(context)
@@ -352,9 +359,11 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
                     addWhat[1] = add
                 elif event.type == "RET": # enter key
                     context.area.header_text_set(None)
+                    #context.workspace.status_text_set(None)
                     return {'FINISHED'}
             elif event.type == 'LEFTMOUSE':
                 context.area.header_text_set(None)
+                #context.workspace.status_text_set(None)
                 return {'FINISHED'}
             elif event.type in {'RIGHTMOUSE', 'ESC'}:
                 self.doCancel(context)
@@ -403,6 +412,7 @@ def menu_func_match(self, context):
     self.layout.operator(MightAndMagicUvMatch.bl_idname, text=MightAndMagicUvMatch.bl_label)
 
 # Register and add to the "uv" menu
+addon_keymaps = []
 def register():
     bpy.utils.register_class(MightAndMagicUvSet)
     bpy.types.VIEW3D_MT_uv_map.append(menu_func_set)
@@ -425,16 +435,10 @@ def unregister():
 
 if __name__ == "__main__":
     register()
-    
-def test():
-    bm = bmesh.mynew()
-    faces = getSelectedFaces(bm)
-    assert len(faces) == 1
-    face = faces[0]
-    uvmap = bm.loops.layers.uv.verify()
-    data = getFaceData(face, uvmap)
-    ux, uy, uz, vx, vy, vz = data[1]
+
+def getFirstAbsoluteVertexUv(face, faceData):
     minU, minV, minUVert, minVVert = None, None, [], []
+    ux, uy, uz, vx, vy, vz = faceData[1]
     for vert in face.verts:
         valU = vert.co[0] * ux + vert.co[1] * uy + vert.co[2] * uz
         valV = vert.co[0] * vx + vert.co[1] * vy + vert.co[2] * vz
@@ -450,35 +454,44 @@ def test():
         else:
             minVVert.clear()
         minVVert.append(vert)
+
     vert = None
     for testVert in minUVert:
         if testVert in minVVert:
             vert = testVert
             break
-    
+
+    assert vert, "Two or more suitable vertices found"
     if vert:
         print("Single vert: {} {} {}, index: {}".format(*vert.co, vert.index))
     else:
         print("MinU vert: {} {} {}, index: {}\nMinV vert: {} {} {}, index: {}".format(*minUVert[0].co, minUVert[0].index, *minVVert[0].co, minVVert[0].index))
-        return
+    bmpWidth, bmpHeight = faceData[2]
+    minU = minU / bmpWidth
+    minV = minV / bmpHeight
+    return minU, minV
+
+    
+def test():
+    bm = bmesh.mynew()
+    faces = getSelectedFaces(bm)
+    assert len(faces) == 1
+    face = faces[0]
+    uvmap = bm.loops.layers.uv.verify()
+    data = getFaceData(face, uvmap)
+    ux, uy, uz, vx, vy, vz = data[1]
         
     # get uv offsets needed to have texture's bottom left corner at found vertex
+    minU, minV = getFirstAbsoluteVertexUv(face, data)
     
     width, height = data[2]
     # CHECK IF ROUNDING OR TRUNCATING IS NEEDED
-    minU = minU / width
-    minV = minV / height
     for changeVert in data[0]:
-        #if changeVert != vert:
-        
         valU = (changeVert.vert.co[0] * ux + changeVert.vert.co[1] * uy + changeVert.vert.co[2] * uz) / width
         valV = (changeVert.vert.co[0] * vx + changeVert.vert.co[1] * vy + changeVert.vert.co[2] * vz) / height
         face.loops[changeVert.loopIndex][uvmap].uv = (valU - minU, valV - minV)
             
     bmesh.update_edit_mesh(bpy.context.edit_object.data)
-    
-    # off = VERTEX UV % 1
-    # texturePos = texture[width/height] * off
 
 bpy.f.test = test
 def getuv():
