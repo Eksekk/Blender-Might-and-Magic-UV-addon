@@ -165,7 +165,7 @@ def changeUvCoordinates(uOffset=0, vOffset=0, assignMaterial=None, absolute=Fals
     bmesh.update_edit_mesh(bpy.context.edit_object.data)
     return uOffset, vOffset
 
-def matchUvToLastSelected(assignMaterial=False):
+def matchUvToLastSelected(assignMaterial=False, absolute=False):
     bm = bmesh.from_edit_mesh(bpy.context.edit_object.data)
     bm.select_history.validate()
     faces = getSelectedFaces(bm)
@@ -179,7 +179,7 @@ def matchUvToLastSelected(assignMaterial=False):
         return False
     u, v = uv
     faces.remove(last)
-    changeUvCoordinates(uOffset = u, vOffset = v, assignMaterial = last.material_index if assignMaterial else None)
+    changeUvCoordinates(uOffset = u, vOffset = v, assignMaterial = last.material_index if assignMaterial else None, absolute = absolute)
     
     bmesh.update_edit_mesh(bpy.context.edit_object.data)
     return u, v
@@ -191,6 +191,71 @@ def getUvFromSelected():
     if len(faces) == 0:
         return False
     return getUvSettingsFromFace(faces[len(faces) - 1], uvmap)
+
+def getFirstAbsoluteVertexUv(face, faceData):
+    minU, minV, minUVert, minVVert = None, None, [], []
+    ux, uy, uz, vx, vy, vz = faceData[1]
+    for vert in face.verts:
+        valU = vert.co[0] * ux + vert.co[1] * uy + vert.co[2] * uz
+        valV = vert.co[0] * vx + vert.co[1] * vy + vert.co[2] * vz
+        
+        if not minU or valU <= minU:
+            minU = valU
+        else:
+            minUVert.clear()
+        minUVert.append(vert)
+        
+        if not minV or valV <= minV:
+            minV = valV
+        else:
+            minVVert.clear()
+        minVVert.append(vert)
+
+    vert = None
+    for testVert in minUVert:
+        if testVert in minVVert:
+            vert = testVert
+            break
+
+    assert vert, "Two or more suitable vertices found"
+    if vert:
+        print("Single vert: {} {} {}, index: {}".format(*vert.co, vert.index))
+    else:
+        print("MinU vert: {} {} {}, index: {}\nMinV vert: {} {} {}, index: {}".format(*minUVert[0].co, minUVert[0].index, *minVVert[0].co, minVVert[0].index))
+    bmpWidth, bmpHeight = faceData[2]
+    minU = minU / bmpWidth
+    minV = minV / bmpHeight
+    return minU, minV
+
+    
+def test():
+    bm = bmesh.mynew()
+    faces = getSelectedFaces(bm)
+    assert len(faces) == 1
+    face = faces[0]
+    uvmap = bm.loops.layers.uv.verify()
+    data = getFaceData(face, uvmap)
+    ux, uy, uz, vx, vy, vz = data[1]
+        
+    # get uv offsets needed to have texture's bottom left corner at found vertex
+    minU, minV = getFirstAbsoluteVertexUv(face, data)
+    
+    width, height = data[2]
+    # CHECK IF ROUNDING OR TRUNCATING IS NEEDED
+    for changeVert in data[0]:
+        valU = (changeVert.vert.co[0] * ux + changeVert.vert.co[1] * uy + changeVert.vert.co[2] * uz) / width
+        valV = (changeVert.vert.co[0] * vx + changeVert.vert.co[1] * vy + changeVert.vert.co[2] * vz) / height
+        face.loops[changeVert.loopIndex][uvmap].uv = (valU - minU, valV - minV)
+            
+    bmesh.update_edit_mesh(bpy.context.edit_object.data)
+
+bpy.f.test = test
+def getuv():
+    bm = bmesh.mynew()
+    return getUvDirections(getSelectedFaces(bm)[0].normal)
+bpy.f.getuv = getuv
+bpy.f.getUvDirections = getUvDirections
+bpy.f.changeUvCoordinates = changeUvCoordinates
 
 def genericPoll(context):
     obj = context.active_object
@@ -265,7 +330,7 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
     bl_label = "Might and Magic UV change modal"
     bl_options = {'REGISTER', 'UNDO'}
 
-    # UV offsets which were applied to selected faces during operator run (to restore original ones later; properties don't auto revert upon cancel as with non-modal operators)
+    # sum of UV offsets which were applied to selected faces during operator run (to restore original ones later; properties don't auto revert upon cancel as with non-modal operators)
     uOffsetShift: bpy.props.IntProperty(options = {"HIDDEN"})
     vOffsetShift: bpy.props.IntProperty(options = {"HIDDEN"})
     
@@ -281,21 +346,35 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
     # Used to "pass data" between modal and execute methods
     addOffsets: bpy.props.CollectionProperty(options = {"HIDDEN"})
 
+    absolute: bpy.props.BoolProperty(name = "Absolute", default=False, options = {"HIDDEN"})
+
     @classmethod
     def poll(cls, context):
         return genericPoll(context)
+    
+    def setStatusText(self, context):
+        text = "current mode: {} | M: switch mode | Ctrl (hold): bigger change | Alt (hold): smaller change".format(self.mode)
+        if self.mode == "MOUSE":
+            lock = "U" if self.uOnly else ("V" if self.vOnly else "NONE")
+            text += " | Current lock: {} | U: change only U coord | V: change only V coord | C: clear constraints".format(lock)
+        elif self.mode == "KEYBOARD":
+            text += u" | \u2190 \u2192 \u2191 \u2193 change coords"
+        context.workspace.status_text_set(text)
 
     def execute(self, context):
         self.uOffsetShift += self.addOffsets[0]
         self.vOffsetShift += self.addOffsets[1]
-        #print("\t".join(self.addOffsets))
         uv = map(int, changeUvCoordinates(uOffset = self.addOffsets[0], vOffset = self.addOffsets[1], addOffsets=True))
         if uv == False:
             return {'CANCELLED'}
         self.addOffsets = [0, 0]
         context.area.header_text_set("U offset: {}\t\tV offset: {}".format(self.uOffsetShift, self.vOffsetShift))
-        #context.workspace.status_text_set("test {}".format(self.uOffsetShift + self.vOffsetShift))
+        self.setStatusText(context)
         return {'FINISHED'}
+
+    def clearTexts(self, context):
+        context.area.header_text_set(None)
+        context.workspace.status_text_set(None)
     
     def doCancel(self, context):
         self.addOffsets = [-self.uOffsetShift, -self.vOffsetShift]
@@ -303,12 +382,15 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
             self.uOnly = False
             self.vOnly = False
         self.execute(context)
-        context.area.header_text_set(None)
+        self.clearTexts(context)
     
     def modal(self, context, event):
         if event.type == "M" and "PRESS" in event.value:
             self.mode = "KEYBOARD" if self.mode == "MOUSE" else "MOUSE"
+            self.setStatusText(context)
             return {"RUNNING_MODAL"}
+        if event.type == "A" and event.value == "PRESS":
+            self.absolute = not self.absolute
         
         if self.mode == "MOUSE":
             if event.type == 'MOUSEMOVE':
@@ -335,8 +417,7 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
                 self.uOnly = False
                 self.vOnly = False
             elif event.type == 'LEFTMOUSE':
-                context.area.header_text_set(None)
-                #context.workspace.status_text_set(None)
+                self.clearTexts(context)
                 return {'FINISHED'}
             elif event.type in {'RIGHTMOUSE', 'ESC'}:
                 self.doCancel(context)
@@ -358,12 +439,10 @@ class MightAndMagicUvChangeModal(bpy.types.Operator):
                 elif event.type == "DOWN_ARROW":
                     addWhat[1] = add
                 elif event.type == "RET": # enter key
-                    context.area.header_text_set(None)
-                    #context.workspace.status_text_set(None)
+                    self.clearTexts(context)
                     return {'FINISHED'}
             elif event.type == 'LEFTMOUSE':
-                context.area.header_text_set(None)
-                #context.workspace.status_text_set(None)
+                self.clearTexts(context)
                 return {'FINISHED'}
             elif event.type in {'RIGHTMOUSE', 'ESC'}:
                 self.doCancel(context)
@@ -396,7 +475,7 @@ class MightAndMagicUvMatch(bpy.types.Operator):
         return genericPoll(context)
 
     def execute(self, context):
-        u, v = matchUvToLastSelected(assignMaterial=self.assignMaterial)
+        u, v = matchUvToLastSelected(assignMaterial=self.assignMaterial, absolute=self.absolute)
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -435,68 +514,3 @@ def unregister():
 
 if __name__ == "__main__":
     register()
-
-def getFirstAbsoluteVertexUv(face, faceData):
-    minU, minV, minUVert, minVVert = None, None, [], []
-    ux, uy, uz, vx, vy, vz = faceData[1]
-    for vert in face.verts:
-        valU = vert.co[0] * ux + vert.co[1] * uy + vert.co[2] * uz
-        valV = vert.co[0] * vx + vert.co[1] * vy + vert.co[2] * vz
-        
-        if not minU or valU <= minU:
-            minU = valU
-        else:
-            minUVert.clear()
-        minUVert.append(vert)
-        
-        if not minV or valV <= minV:
-            minV = valV
-        else:
-            minVVert.clear()
-        minVVert.append(vert)
-
-    vert = None
-    for testVert in minUVert:
-        if testVert in minVVert:
-            vert = testVert
-            break
-
-    assert vert, "Two or more suitable vertices found"
-    if vert:
-        print("Single vert: {} {} {}, index: {}".format(*vert.co, vert.index))
-    else:
-        print("MinU vert: {} {} {}, index: {}\nMinV vert: {} {} {}, index: {}".format(*minUVert[0].co, minUVert[0].index, *minVVert[0].co, minVVert[0].index))
-    bmpWidth, bmpHeight = faceData[2]
-    minU = minU / bmpWidth
-    minV = minV / bmpHeight
-    return minU, minV
-
-    
-def test():
-    bm = bmesh.mynew()
-    faces = getSelectedFaces(bm)
-    assert len(faces) == 1
-    face = faces[0]
-    uvmap = bm.loops.layers.uv.verify()
-    data = getFaceData(face, uvmap)
-    ux, uy, uz, vx, vy, vz = data[1]
-        
-    # get uv offsets needed to have texture's bottom left corner at found vertex
-    minU, minV = getFirstAbsoluteVertexUv(face, data)
-    
-    width, height = data[2]
-    # CHECK IF ROUNDING OR TRUNCATING IS NEEDED
-    for changeVert in data[0]:
-        valU = (changeVert.vert.co[0] * ux + changeVert.vert.co[1] * uy + changeVert.vert.co[2] * uz) / width
-        valV = (changeVert.vert.co[0] * vx + changeVert.vert.co[1] * vy + changeVert.vert.co[2] * vz) / height
-        face.loops[changeVert.loopIndex][uvmap].uv = (valU - minU, valV - minV)
-            
-    bmesh.update_edit_mesh(bpy.context.edit_object.data)
-
-bpy.f.test = test
-def getuv():
-    bm = bmesh.mynew()
-    return getUvDirections(getSelectedFaces(bm)[0].normal)
-bpy.f.getuv = getuv
-bpy.f.getUvDirections
-bpy.f.changeUvCoordinates = changeUvCoordinates
